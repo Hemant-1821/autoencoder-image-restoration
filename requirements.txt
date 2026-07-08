@@ -1,0 +1,9 @@
+tensorflow==2.16.*
+tensorflow-metal; sys_platform == "darwin" and platform_machine == "arm64"
+numpy
+pillow
+opencv-python
+matplotlib
+scikit-learn
+streamlit
+kaggle

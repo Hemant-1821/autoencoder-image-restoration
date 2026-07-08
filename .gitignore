@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# data & trained models (large / regenerable)
+data/raw/**
+!data/raw/denoising/.gitkeep
+!data/raw/colorization/.gitkeep
+data/processed/**
+!data/processed/.gitkeep
+models/**/*.h5
+models/**/*.keras
+models/**/saved_model/
+
+.DS_Store
+.ipynb_checkpoints/
+.streamlit/
+
+# raw scraped dataset (large binary images, not source)
+/dataset/
+
+# local Claude Code session state
+.claude/

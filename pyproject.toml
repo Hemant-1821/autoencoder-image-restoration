@@ -1,0 +1,12 @@
+[project]
+name = "autoencoder-image-restoration"
+version = "0.1.0"
+description = "Convolutional autoencoders for image denoising and colourization, with a Streamlit UI to run both on any uploaded image."
+requires-python = ">=3.10,<3.13"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
