@@ -7,10 +7,14 @@ build/
 dist/
 
 # data & trained models (large / regenerable)
-data/raw/**
+data/raw/*
+!data/raw/denoising/
+!data/raw/colorization/
+data/raw/denoising/*
 !data/raw/denoising/.gitkeep
+data/raw/colorization/*
 !data/raw/colorization/.gitkeep
-data/processed/**
+data/processed/*
 !data/processed/.gitkeep
 models/**/*.h5
 models/**/*.keras
