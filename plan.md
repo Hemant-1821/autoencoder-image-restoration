@@ -22,28 +22,51 @@ Two stages: an **offline cleaning pass** (run once, output cached to disk) and a
 Runs once over the 6,486 scraped images, produces a single canonical clean RGB dataset
 shared by both tasks (no separate copies for denoising vs colorization).
 
-1. **Integrity check**: open every file with PIL; drop unreadable/corrupt/truncated images.
-2. **Format handling**:
-   - Convert everything to RGB (handles RGBA/CMYK/palette/grayscale source images,
-     strips alpha).
-   - GIFs (71 files): drop entirely (animated, not representative static photos) —
-     default; revisit if we want the extra ~1% of data.
-3. **Dedup**: MD5 hash of raw file bytes to drop exact duplicates (some overlap is likely
-   given overlapping topic keywords, e.g. "Cat"/"Cats", "Car"/"Cars", "Motorcycle"/
-   "Motorbike"). Perceptual hashing (catches re-compressed/resized re-uploads of the same
-   photo) is a possible follow-up if exact-hash dedup leaves visible near-duplicates.
-4. **Resize + crop to 128x128** (confirmed, data-driven): sample of 300 images showed
+Per-image order (each step only runs if the image survived the previous ones — cheapest/
+header-only checks first, expensive decode/resize work last):
+
+1. **Dedup pre-check**: MD5 hash of raw file bytes; drop exact duplicates before even
+   decoding the image (some overlap is likely given overlapping topic keywords, e.g.
+   "Cat"/"Cats", "Car"/"Cars", "Motorcycle"/"Motorbike"). Perceptual hashing (catches
+   re-compressed/resized re-uploads of the same photo) is a possible follow-up if
+   exact-hash dedup leaves visible near-duplicates.
+2. **Integrity check**: open the file with PIL; drop unreadable/corrupt/truncated images.
+3. **Format check**: GIFs (71 files) dropped entirely (animated, not representative static
+   photos) — default; revisit if we want the extra ~1% of data.
+4. **Aspect ratio check**: drop images with `width/height` outside **0.5–2.0** (banner
+   ads, panoramic shots) — computed from header size, before resizing, since these would
+   otherwise get destructively cropped down to a small, unrepresentative slice.
+5. **Min source dimension check**: drop if the shorter side is below `MIN_SOURCE_DIM`
+   (64px) — negligible in practice (~1/300 in the sample was below 128px pre-resize), but
+   avoids heavily upscaling tiny images.
+6. **Convert to RGB**: handles RGBA/CMYK/palette/grayscale source images; alpha is
+   composited onto a white background rather than naively discarded (avoids black
+   fringing on transparent edges).
+7. **Resize + crop to 128x128** (confirmed, data-driven): sample of 300 images showed
    median resolution ~1024x760 and aspect ratios ranging 0.41–3.88 (only ~14% roughly
    square), so a direct crop-only approach would discard nearly all image content and
    risk cutting off the subject. Instead: **resize shorter side to 128px (preserving
    aspect ratio, no distortion) then center-crop to 128x128.**
-5. **Drop images still undersized after resize** — negligible (~1/300 in the sample was
-   below 128px in any dimension pre-resize).
-6. **Save** as clean RGB (PNG, lossless — avoids re-introducing JPEG artifacts into what's
+8. **Blank/near-blank check**: computed on the *final cropped 128x128 image* (not the
+   original) since that's what training actually sees — a busy original could still crop
+   down to a blank sky/wall, and vice versa. Grayscale the crop and compute pixel
+   std-dev; drop if below a threshold (default **10**, on a 0–255 scale — real photos are
+   typically 30+, flat/placeholder images are near 0).
+9. **Save** as clean RGB (PNG, lossless — avoids re-introducing JPEG artifacts into what's
    supposed to be the "clean" ground truth) into `data/processed/`.
-7. **Train/val/test split**: default **80/10/10**, single shared split used by both tasks
-   (split once on the clean image pool, since both tasks derive from the same source
-   images). Split done with `SEED=42` from `config.py` for reproducibility.
+10. **Train/val/test split**: default **80/10/10**, single shared split used by both
+    tasks (split once on the clean image pool, since both tasks derive from the same
+    source images). Split done with `SEED=42` from `config.py` for reproducibility.
+
+### Colorization-only filter — separate script, not part of shared cleaning
+Some clean images may already be (near-)grayscale in origin despite being stored as
+3-channel RGB (no real color content to recover). That's fine for denoising (noise
+removal doesn't care about original colorfulness) but bad for colorization training
+(target a/b channels ≈ 0 teaches the model to predict no color). Rather than dropping
+these from the shared `data/processed/` pool, a **separate script, run only before
+colorization training**, will convert each candidate to HSV and compute mean saturation,
+excluding images below a conservative threshold (default: mean saturation < ~2%) from
+colorization's file list only. Denoising is unaffected.
 
 ### Stage 2 — On-the-fly `tf.data` pipeline (every epoch, from `data/processed/`)
 No task-specific data is pre-generated or stored — corruption is applied live so the
@@ -69,8 +92,19 @@ model sees fresh variation every epoch (train split) while eval stays reproducib
 ### Defaults assumed above (flag if you want these changed)
 - Dedup via exact MD5 hash only (not perceptual hash) for the first pass.
 - GIFs dropped rather than sampling a frame.
+- Aspect ratio bounds **0.5–2.0** (outside this range, dropped as banner/panoramic).
+- Min source dimension **64px** before resize.
+- Blank-image std-dev threshold **10** (post-crop, grayscale 0–255 scale).
+- Colorization grayscale-source threshold: mean saturation **< ~2%** (HSV), conservative
+  to avoid false-dropping legitimately muted/desaturated color photos.
 - 80/10/10 train/val/test split, shared across both tasks.
 - Cleaned images stored as PNG (lossless) rather than re-compressed JPEG.
+
+### Known limitation (not acted on)
+The scraper notebook calls `bing_image_downloader` with `adult_filter_off=True`, which
+disables Bing's safe-search filter rather than enabling it — the scrape wasn't restricted
+to safe content. No automated NSFW filtering is planned (heavy dependency, out of scope);
+noting this as a known limitation rather than acting on it.
 
 ## Status
 
@@ -88,12 +122,21 @@ model sees fresh variation every epoch (train split) while eval stays reproducib
 - [x] Ran the scraper: `dataset/` now has 6,486 images across 74 topic folders (~1.9GB,
       mixed jpg/png/jpeg/webp/gif/jfif). This folder is gitignored (local raw artifact,
       not committed).
+- [x] **Offline cleaning pipeline implemented** as `src/autoencoders/data_preprocessing/`
+      (see `preprocessing.md` in that folder for the full stage-by-stage writeup) and run
+      via `scripts/build_dataset.py`. Actual results from the real `dataset/` run:
+      scanned 6,486 -> kept 6,049 (dropped: aspect_ratio 257, blank 15, duplicate 86,
+      undersized 8, unsupported_extension 71 — the last matching exactly the 71 GIFs
+      found in the original scan, and zero `unreadable`/corrupt files). Split into
+      train/val/test = 4,839 / 604 / 606. Spot-checked output images: 128x128 RGB PNGs,
+      correctly named `<topic>__<original_stem>.png`.
 
 ### Left to do
-- [ ] **Data pipeline**: implement the design above — offline cleaning script
-      (`dataset/` -> `data/processed/{train,val,test}`) plus the on-the-fly `tf.data`
-      transforms (noise for denoising, RGB→Lab for colorization). Design is finalized; not
+- [ ] **On-the-fly `tf.data` transforms**: noise injection for denoising, RGB→Lab
+      conversion for colorization — applied at training time from `data/processed/`, not
       yet written.
+- [ ] **Colorization-only grayscale-source filter** (separate script, see "Data pipeline —
+      finalized design" above) — not yet written.
 - [ ] **Model architecture**: design the U-Net(s) for each task — depth (number of
       down/up-sampling stages), filter counts per stage, still to be decided. Architecture
       style (U-Net) and independence (no shared backbone) are settled — see Resolved
